@@ -31,4 +31,8 @@ UBuoyantMeshComponent::UBuoyantMeshComponent()
 	SetSimulatePhysics(true);
 	BodyInstance.AngularDamping = 0.0f;
 	BodyInstance.LinearDamping = 0.0f;
+	SetCollisionEnabled(ECollisionEnabled::PhysicsOnly);
+	SetCollisionObjectType(ECC_Pawn);
+	SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+
 }

@@ -27,6 +27,7 @@
 
 //Project Includes:
 #include "NetworkedBuoyantPawnMovementComponent.h"
+#include "PhysicsMovementReplication.h"
 
 //Engine Includes:
 #include "CoreMinimal.h"
@@ -45,78 +46,6 @@
 class UBuoyantMeshComponent;
 struct FBodyInstance;
 
-USTRUCT()
-struct FSnapshotSettings
-{
-	GENERATED_BODY()
-
-	UPROPERTY()
-		uint32 SendRate = 30; //Number of snapshots to send per second
-
-	UPROPERTY()
-		float BufferDelay = 100.0f; //in milliseconds
-
-	FSnapshotSettings() {};
-};
-
-USTRUCT()
-struct FMovementSnapshot
-{
-	GENERATED_BODY()
-
-	UPROPERTY()
-		FVector LinearVelocity;
-
-	UPROPERTY()
-		FVector AngularVelocity;
-
-	UPROPERTY()
-		FVector Location;
-
-	UPROPERTY()
-		FRotator Rotation;
-
-	UPROPERTY()
-		float ClientTimeStamp = 0.0f;
-
-	FMovementSnapshot() {};
-	FMovementSnapshot(FVector LinVel, FVector AngVel, FVector Loc, FRotator Rot, float Timestamp) :
-	LinearVelocity(LinVel), AngularVelocity(AngularVelocity), Location(Loc), Rotation(Rot), ClientTimeStamp(Timestamp){}
-};
-
-USTRUCT()
-struct FSnapShotBuffer
-{
-	GENERATED_BODY()
-
-	UPROPERTY()
-		TArray<FMovementSnapshot> SnapshotBuffer;
-
-	UPROPERTY()
-		float Delay = 100.0f;
-
-	UPROPERTY()
-		float TimeSinceLastBufferUpdate = 0.0f;
-
-	FSnapShotBuffer() {};
-	FSnapShotBuffer(uint32 Size, float BufferDelay)
-	{
-		SnapshotBuffer.SetNum(Size);
-		Delay = BufferDelay;
-	}
-
-	void UpdateSnapShots(FMovementSnapshot NewSnapshot)
-	{
-		SnapshotBuffer.Empty();
-		SnapshotBuffer.Add(NewSnapshot);
-	}
-
-	void UseSnapShot(int32 Index)
-	{
-		SnapshotBuffer.RemoveAt(Index);
-	}
-};
-
 UCLASS()
 class SAILSOFWAR_API ANetworkedBuoyantPawn : public APawn
 {
@@ -128,13 +57,13 @@ public:
 	
 	/**
 	*	
-	*	@return	class UNetworkedBuoyantPawnMovementComponent* -
+	*	@return UNetworkedBuoyantPawnMovementComponent* -
 	*/
 	class UNetworkedBuoyantPawnMovementComponent* GetBuoyantMovementComponent() const { return BuoyantMovementComponent; }
 
 	/**
 	*	
-	*	@return	class UBuoyantMeshComponent* -
+	*	@return UBuoyantMeshComponent* -
 	*/
 	class UBuoyantMeshComponent* GetBuoyantMeshComponent() const { return BuoyantMeshComponent; }
 
@@ -153,13 +82,13 @@ private:
 
 /** Physics **/
 public:
-
 	/**
 	*	Finds and returns the root body instance of our BuoyantMeshComponent
 	*	@return	FBodyInstance* - the body instance to return
 	*/
 	FBodyInstance* GetRootBodyInstance();
-	FCalculateCustomPhysics OnCalculateCustomPhysics;
+
+	FCalculateCustomPhysics OnCalculateCustomPhysics; //Binds the pawn tick to our sub-steps in the MovementComponent
 
 public:
 	void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
@@ -167,40 +96,60 @@ public:
 	virtual UPawnMovementComponent* GetMovementComponent() const override;
 	virtual void PostInitializeComponents() override; //Overridden to set our required tick order & trigger the buoyant mesh setup
 
+
 /** Networking **/
 protected:
 	/**
-	*	
+	*	Attempt to send an RPC update to the server if the interval between updates has passed.
+	*	@param	DeltaTime - 
 	*/
-	virtual void ClientPackAndSendSnapshot();
+	virtual void ClientUpdateMovement(float DeltaTime);
 
 	/**
 	*
 	*	@param	SnapShot -
 	*/
 	UFUNCTION(Server, Unreliable, WithValidation)
-	virtual void ServerReceiveSnapShot(FMovementSnapshot SnapShot);
+	virtual void ServerRecieveMovement(const FMovementSnapshot& SnapShot);
 
 	/**
 	*	
 	*	@param	SnapShot - 
 	*/
-	virtual void ServerUpdateSnapshotBuffer(FMovementSnapshot SnapShot);
+	virtual void ServerHandleRecievedMovement(const FMovementSnapshot& SnapShot);
 
-	UPROPERTY(ReplicatedUsing = OnRep_SnapShotReplicatedMovement)
-		FSnapShotBuffer ServerSnapShotBuffer; //The server's snapshot buffer used for collision resolution and keeping track of the snapshots
+	/**
+	*	
+	*	@param	DeltaTime - 
+	*/
+	virtual void ServerSimulateMovement(float DeltaTime);
 
-	UPROPERTY(/*NotReplicated*/)
-		FSnapShotBuffer LocalSnapShotBuffer; //The local snapshot buffer for Simulated Proxies
+	/**
+	*	
+	*	@param	DeltaTime - 
+	*/
+	virtual void SimulateMovement(float DeltaTime);
 
+	/**
+	*	
+	*	@param	SnapShot - 
+	*/
+	UFUNCTION(NetMulticast, Unreliable)
+	virtual void MultiCastRecieveMovement(const FMovementSnapshot& SentSnapShot);
+	
+	UPROPERTY()
+		FPhysicsMovementReplication PhysicsReplicationData; //Physics Movement Replication Information and Data. Not replicated, but manually updated.
+
+	
+
+
+/*APawn Overrides*/
+public:
+	virtual void Restart() override;	//Overridden to allow us to disable gravity calculations on the server for client pawns
+protected:
+	virtual void BeginPlay() override;	//...
 	UFUNCTION()
-	/**
-	*	
-	*/
-	virtual void OnRep_SnapShotReplicatedMovement();
+	virtual void OnRep_ReplicatedMovement() override;	//...
 
-	/**
-	*	
-	*/
-	virtual void PerformBufferSnapshotMovement();
+
 };

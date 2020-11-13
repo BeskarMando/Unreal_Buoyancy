@@ -139,7 +139,7 @@ struct FBuoyancyInformation
 	UPROPERTY(EditAnywhere, Category = "Physics")
 		FPhysicsOverrides PhysicsOverrides;
 
-		FBuoyancyInformation() {};
+	FBuoyancyInformation() {};
 };
 
 UCLASS()
@@ -152,7 +152,15 @@ public:
 	
 /** Buoyancy **/
 public: 
+	/**
+	*	
+	*	@return	bool -
+	*/
 	bool ShouldOverrideMass() { return BuoyancyInformation.PhysicsOverrides.bOverrideMass; }
+	/**
+	*	
+	*	@return	float -
+	*/
 	float GetMassOverride() { return BuoyancyInformation.PhysicsOverrides.MassOverride; }
 
 	/**
@@ -185,10 +193,10 @@ protected:
 /** Debug **/
 public:
 	UPROPERTY(EditAnywhere, Category = "Debug")
-		bool bDebugShowWaterline = false; //Setting this to true will cause the component to draw the waterline intersection around the mesh
+		bool bDebugDrawWaterline = false; //Setting this to true will cause the component to draw the waterline intersection around the mesh
 
 	UPROPERTY(EditAnywhere, Category = "Debug")
-		bool bShowForceTriangles = false; //Setting this to true will cause the component to draw the force triangles around the mesh
+		bool bDebugDrawForceTriangles = false; //Setting this to true will cause the component to draw the force triangles around the mesh
 
 	UPROPERTY(EditAnywhere, Category = "Debug")
 		bool bDebugDrawHeading = false; //Setting this to true will cause the component to draw the angular and linear velocities
@@ -200,7 +208,7 @@ public:
 		bool bDebugDrawGrid = true; //Setting this to true will cause the component to draw the angular and linear velocities
 
 	UPROPERTY(EditAnywhere, Category = "Debug")
-		bool bDebugShowGridTargetBounds = true; //Setting this to true will cause the component to draw the body instance's bounding box
+		bool bDebugDrawGridTargetBounds = true; //Setting this to true will cause the component to draw the body instance's bounding box
 
 	UPROPERTY(EditAnywhere, Category = "Debug")
 		bool bDebugDrawBuoyantForce = true; //Setting this to true will cause the component to draw the HF
@@ -218,7 +226,10 @@ public:
 		bool bDebugDrawViscousWaterResistanceForce = true; //Setting this to true will cause the component to draw the VWRF
 
 	UPROPERTY(EditAnywhere, Category = "Debug")
-		float ForceLengthScalar = 10.0f; //Scalar used to divide forces by for visualizing forces
+		bool bDebugDrawCompareForces = true; //Setting this to true will cause the component to show the cumulative force applied for each force
+
+	UPROPERTY(EditAnywhere, Category = "Debug")
+		float ForceLengthScalar = 1000.0f; //Scalar used to divide forces by for visualizing forces
 
 protected:
 	/**
@@ -233,15 +244,13 @@ protected:
 		FWaterGrid WaterGrid; //Water Grid Data used for our water submersion simulation
 
 protected:
-
 	UPROPERTY()
 		class UBuoyantMeshComponent* BuoyantMesh = nullptr; //Reference to the root component used for our physics simulation
-	//IMPORT_TASK: 
+	//IMPORT_TASK: Set this to your ocean actor - to do create height request function inside the movement class
 	UPROPERTY()
 		class ASOWOceanActor* OceanActor = nullptr; // Reference to ocean actor for height queries
 
 /** Movement **/
-
 public:
 	virtual void PhysicsSubstep(float DeltaTime, FBodyInstance* BodyInstance);
 

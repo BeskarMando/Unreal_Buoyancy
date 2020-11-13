@@ -42,7 +42,7 @@
 #include "UnrealNetwork.h"
 
 #define PrintWarning(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 10, FColor::Red, Text)
-#define PrintMessage(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Green, Text)
+//#define PrintMessage(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Green, Text)
 #define LogWarning(Text) UE_LOG(LogTemp, Warning, TEXT(Text))
 
 DECLARE_CYCLE_STAT(TEXT("UpdateWaterGrid"), STAT_WaterGrid, STATGROUP_BuoyancyPhysics);
@@ -58,7 +58,7 @@ DECLARE_CYCLE_STAT(TEXT("MovementSubStep"), STAT_MovementSubStep, STATGROUP_Phys
 
 UNetworkedBuoyantPawnMovementComponent::UNetworkedBuoyantPawnMovementComponent()
 {
-	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	PrimaryComponentTick.EndTickGroup = TG_PostPhysics;
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bTickEvenWhenPaused = true;
@@ -187,11 +187,12 @@ void UNetworkedBuoyantPawnMovementComponent::UpdateWaterGrid(float SubstepDeltaT
 	SCOPE_CYCLE_COUNTER(STAT_WaterGrid);
 	{
 		UWorld* World = GetWorld();
-		if (!BodyInstance->GetBodyBounds().IsInside(WaterGrid.GetWaterGridBoundingBox())) //We shouldn't need to transform the bounding box by the body's rotation
+		if (!BodyInstance->GetBodyBounds().IsInsideXY(WaterGrid.GridBounds)) //We shouldn't need to transform the bounding box by the body's rotation
 			WaterGrid = FWaterGrid(BuoyancyInformation.WaterGridCellSize, BuoyantMesh->GetStaticMesh()->GetBoundingBox().GetSize(), BodyInstanceTransform.GetLocation());
 		
 		//IMPORT_TASK: Change to AGameState instead
 		//UPDATE_TASK: Correctly update the server time to prevent drift by overriding GetServerWorldTimeSeconds()
+		//UPDATE_TASK: Profile cost of using 2 non-linear equations instead of 4 extra queries.
 		ASOWGameState* SOWGS = GetWorld()->GetGameState<ASOWGameState>();
 		if (SOWGS)
 		{
@@ -199,8 +200,19 @@ void UNetworkedBuoyantPawnMovementComponent::UpdateWaterGrid(float SubstepDeltaT
 			{
 				for (int PCol = 0; PCol < WaterGrid.Vertices[PRow].Num(); PCol++)
 				{
-					FVector TempVector = OceanActor->GetOceanOffset(WaterGrid.Vertices[PRow][PCol].Vertex, SOWGS->GetServerWorldTimeSeconds());
-					WaterGrid.Vertices[PRow][PCol].Vertex.Z = OceanActor->GetOceanHeight(WaterGrid.Vertices[PRow][PCol].Vertex - TempVector, SOWGS->GetServerWorldTimeSeconds());
+					//FVector TempVector = OceanActor->GetOceanVector(WaterGrid.Vertices[PRow][PCol].Vertex, SOWGS->GetServerWorldTimeSeconds());
+					//WaterGrid.Vertices[PRow][PCol].Vertex.Z = OceanActor->GetOceanHeight(WaterGrid.Vertices[PRow][PCol].Vertex - TempVector, SOWGS->GetServerWorldTimeSeconds());
+					const FVector& InputVert = WaterGrid.Vertices[PRow][PCol].Vertex;
+					FVector A = FVector(WaterGrid.CellSize * 0.5f, -WaterGrid.CellSize * 0.5f, 0.0f);
+					FVector B = FVector(-WaterGrid.CellSize * 0.5f, -WaterGrid.CellSize * 0.5f, 0.0f);
+					FVector C = FVector(WaterGrid.CellSize * 0.5f, WaterGrid.CellSize * 0.5f, 0.0f);
+					FVector D = FVector(-WaterGrid.CellSize * 0.5f, WaterGrid.CellSize * 0.5f, 0.0f);
+					FVector OutputA = OceanActor->GetOceanVector(InputVert + A, SOWGS->GetServerWorldTimeSeconds());
+					FVector OutputB = OceanActor->GetOceanVector(InputVert + B, SOWGS->GetServerWorldTimeSeconds());
+					FVector OutputC = OceanActor->GetOceanVector(InputVert + C, SOWGS->GetServerWorldTimeSeconds());
+					FVector OutputD = OceanActor->GetOceanVector(InputVert + D, SOWGS->GetServerWorldTimeSeconds());
+					FVector Output = (OutputA + OutputB + OutputC + OutputD) / 4.0f;
+					WaterGrid.Vertices[PRow][PCol].Vertex.Z = OceanActor->GetOceanHeight(InputVert - Output, SOWGS->GetServerWorldTimeSeconds());
 				}
 			}
 		}	
@@ -422,7 +434,9 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateAndApplyWaterEntryForce(co
 				FVector LastSweptWaterVolume = LastSubmergedArea * BuoyancyData.SubFrameCircularBuffer[0].BuoyantData.Triangles[UncutTriangleIndex].Velocity;
 				FVector CurrentSweptWaterVolume = CurrentSubmergedArea * UnCutTriangle.Velocity;
 				float TriangleAcceleration = FVector((CurrentSweptWaterVolume - LastSweptWaterVolume) / (UnCutTriangle.Area * SubstepDeltaTime)).Size();
-				float TriangleAccelerationMaximum = (UnCutTriangle.Velocity.Size() * UnCutTriangle.Area) / (UnCutTriangle.Area * SubstepDeltaTime); //(UnCutTriangle.Velocity.Size() / SubstepDeltaTime);
+				//We should do the following:
+				//...
+				float TriangleAccelerationMaximum = TriangleAcceleration; //(UnCutTriangle.Velocity.Size() * UnCutTriangle.Area) / (UnCutTriangle.Area * SubstepDeltaTime); 
 				
 				/*
 				* Stopping Force Equation:
@@ -448,7 +462,7 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateAndApplyWaterEntryForce(co
 					if (bDebugDrawWaterEntryForce)
 					{
 						DrawDebugSphere(GetWorld(), UnCutTriangle.Center, 16.0f, 4, FColor::Red);
-						DrawDebugLine(GetWorld(), UnCutTriangle.Center, UnCutTriangle.Center + UnCutTriangle.WaterEntryForce / ForceLengthScalar, FColor::Red, false);
+						UKismetSystemLibrary::DrawDebugArrow(GetWorld(), UnCutTriangle.Center, UnCutTriangle.Center + (UnCutTriangle.WaterEntryForce / ForceLengthScalar), 16.0f, FColor::Red, 0.0f, 4.0f);
 					}
 				}	
 			}
@@ -498,23 +512,23 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 			{
 				float LinearDragTerm = BuoyancyInformation.DampingForces.PressureDragLinearCoefficient * (Triangle.Velocity.Size() / RefSpeed);
 				float QuadraticDragTerm = BuoyancyInformation.DampingForces.PressureDragQuadraticCoefficient * FMath::Pow(Triangle.Velocity.Size() / RefSpeed, 2);
-				FVector PartialTerm = Triangle.Area * FMath::Pow(Theta, BuoyancyInformation.DampingForces.PressureDragFallOffPower) * Triangle.OutwardNormal;
+				FVector PartialTerm = Triangle.Area * FMath::Pow(FMath::Cos(Theta), BuoyancyInformation.DampingForces.PressureDragFallOffPower) * Triangle.OutwardNormal;
 				Triangle.PressureDragForce = BuoyancyInformation.DampingForces.PDFScalar * -(LinearDragTerm + QuadraticDragTerm) * PartialTerm;
 				
 				if (bDebugDrawPressureDragForce)
-					UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + Triangle.PressureDragForce / ForceLengthScalar, 15.0f, FColor::Orange, 0.0f, 1.0f);
-				
+					UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + (Triangle.PressureDragForce / ForceLengthScalar), 16.0f, FColor::Orange, 0.0f, 4.0f);
+
 				BuoyancyData.SubFrameCircularBuffer[1].CumulativePressureDragForces += Triangle.PressureDragForce;
 			}
 			else 
 			{
 				float LinearDragTerm = BuoyancyInformation.DampingForces.SuctionDragLinearCoefficient * (Triangle.Velocity.Size() / RefSpeed);
 				float QuadraticDragTerm = BuoyancyInformation.DampingForces.SuctionDragQuadraticCoefficient * FMath::Pow(Triangle.Velocity.Size() / RefSpeed, 2);
-				FVector PartialTerm = Triangle.Area * FMath::Pow(FMath::Abs(Theta), BuoyancyInformation.DampingForces.SuctionDragFallOffPower) * Triangle.OutwardNormal;
+				FVector PartialTerm = Triangle.Area * FMath::Pow(FMath::Cos(Theta), BuoyancyInformation.DampingForces.SuctionDragFallOffPower) * Triangle.OutwardNormal;
 				Triangle.PressureDragForce = BuoyancyInformation.DampingForces.PDFScalar * (LinearDragTerm + QuadraticDragTerm) * PartialTerm;
 				
 				if (bDebugDrawPressureDragForce)
-					UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + Triangle.PressureDragForce / ForceLengthScalar, 15.0f, FColor::Yellow, 0.0f, 1.0f);
+					UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + (Triangle.PressureDragForce / ForceLengthScalar), 16.0f, FColor::Yellow, 0.0f, 4.0f);
 
 				BuoyancyData.SubFrameCircularBuffer[1].CumulativePressureDragForces += Triangle.PressureDragForce;
 			}
@@ -538,9 +552,10 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 			The Resistance coefficient is calculated as Cf(Rn) = 0.075/(log10Rn-2)^2
 			*/
 
+			//UPDATE_TASK: REYNOLDS_NUMBER_LENGTH - calculate the length here
 			const float Length = BuoyancyInformation.HullLength;
 			const float ReynoldsNumber = (Triangle.Velocity.Size() * Length) / BuoyancyInformation.FluidViscosity;		
-			const float ResistanceCoefficient = 0.075f / FMath::Pow(FMath::LogX(10, ReynoldsNumber) - 2.0f, 2.0f); 	//TODO: Benchmark cost of Log10 operation
+			const float ResistanceCoefficient = 0.075f / FMath::Pow(FMath::LogX(10, ReynoldsNumber) - 2.0f, 2.0f); 	//UPDATE_TASK: OPTIMIZATION_UPDATE - Check cost of Log10
 			const FVector TangentialVelocity = FVector::CrossProduct(Triangle.OutwardNormal, FVector::CrossProduct(Triangle.OutwardNormal, Triangle.Velocity) / Triangle.Velocity.Size()) / Triangle.Velocity.Size();
 
 			const FVector TangentialDirection = TangentialVelocity.GetSafeNormal(); 
@@ -550,7 +565,7 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 			BuoyancyData.SubFrameCircularBuffer[1].CumulativeWaterResistanceForce += Triangle.WaterResistanceForce;
 			
 			if(bDebugDrawViscousWaterResistanceForce)
-				UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + Triangle.WaterResistanceForce / ForceLengthScalar, 15.0f, FLinearColor::Green, 0.0f, 1.0f);
+				UKismetSystemLibrary::DrawDebugArrow(GetWorld(), Triangle.Center, Triangle.Center + Triangle.WaterResistanceForce / ForceLengthScalar, 15.0f, FLinearColor::Green, 0.0f, 8.0f);
 		}
 	}
 }
@@ -558,7 +573,6 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 {
 	UWorld* World = GetWorld();
-	FTransform Transform = BuoyantMesh->GetBodyInstance()->GetUnrealWorldTransform(); //TODO refactor pointer call
 
 	if (bDebugDrawGrid)
 	{
@@ -574,22 +588,17 @@ void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 				}
 			}
 		}
-
-		ANetworkedBuoyantPawn* Owner = Cast<ANetworkedBuoyantPawn>(GetOwner());
-		if (Owner)
-		{
-			FBodyInstance* BodyInstance = Owner->GetRootBodyInstance();
-			if (BodyInstance)
-			{
-				FBox BodyBoundsBox = BodyInstance->GetBodyBounds();
-				DrawDebugBox(World, BodyInstance->GetUnrealWorldTransform().GetLocation(), BodyBoundsBox.GetExtent(), FColor::Yellow, false);
-			}
-		}
+	}
+	
+	if (bDebugDrawGridTargetBounds)
+	{
+		DrawDebugBox(World, BodyInstanceTransform.GetLocation(), WaterGrid.TargetBounds.GetExtent(), FColor::Yellow, false);
+		DrawDebugBox(World, WaterGrid.GetCenter(), WaterGrid.GridBounds.GetCenter(), FColor::Red, false);
 	}
 
 	if (BuoyancyData.SubFrameCircularBuffer.IsValidIndex(1))
 	{
-		if (bShowForceTriangles)
+		if (bDebugDrawForceTriangles)
 		{
 			for (FBuoyantTriangle& Triangle : BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.SubmergedTriangles)
 			{
@@ -600,37 +609,55 @@ void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 				DrawDebugLine(World, Triangle.ForceCenter, Triangle.ForceCenter + ((Triangle.HydrostaticForce.Size() / ForceLengthScalar) * Triangle.OutwardNormal) / ForceLengthScalar, FColor::Yellow, false);
 			}
 		}
-
-		if (bDebugDrawBuoyantForce)
+		
+		if (bDebugDrawCenterOfMass)
 		{
-			if (BuoyancyData.SubFrameCircularBuffer.IsValidIndex(1))
+			DrawDebugSphere(World, BuoyantMesh->BodyInstance.GetCOMPosition(), 64.0f, 8, FColor::Yellow, false);
+		}
+
+		if (bDebugDrawHeading)
+		{
+			UKismetSystemLibrary::DrawDebugArrow(World, BodyInstanceTransform.GetLocation(), BodyInstanceTransform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldAngularVelocityInRadians_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Blue, 0.0f, 25.0f);
+			UKismetSystemLibrary::DrawDebugArrow(World, BodyInstanceTransform.GetLocation(), BodyInstanceTransform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldVelocity_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Green, 0.0f, 25.0f);
+		}
+		
+		if (bDebugDrawMeshData)
+		{
+			//Triangles
+			for (int32 TriIndex = 0; TriIndex < BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles.Num(); TriIndex++)
 			{
-				FVector CenterOfMass = BuoyantMesh->BodyInstance.GetCOMPosition();
-				DrawDebugSphere(World, CenterOfMass, 64.0f, 8, FColor::White, false);
+				if (bDebugDrawMeshData)
+				{
+					//Normal
+					DrawDebugLine(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Center, (100.0f *  BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].OutwardNormal) + BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Center, FColor::White, false, -1.0f, 000, 1.0f);
+
+					//Edges
+					DrawDebugLine(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[0].Vertex, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[1].Vertex, FColor::White, false, -1.f, 000, 2.0f);
+					DrawDebugLine(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[1].Vertex, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[2].Vertex, FColor::White, false, -1.f, 000, 2.0f);
+					DrawDebugLine(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[2].Vertex, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Vertices[0].Vertex, FColor::White, false, -1.f, 000, 2.0f);
+				}
+			}
+
+			//Vertices
+			for (int32 VertIndex = 0; VertIndex < BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.UniqueVertices.Num(); VertIndex++)
+			{
+				DrawDebugSphere(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.UniqueVertices[VertIndex].Vertex, 8.0f, 4, FColor::White, false);
 			}
 		}
 		
-		if (bDebugDrawHeading)
+		if (bDebugDrawCompareForces)
 		{
-			UKismetSystemLibrary::DrawDebugArrow(World, Transform.GetLocation(), Transform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldAngularVelocityInRadians_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Blue, 0.0f, 25.0f);
-			UKismetSystemLibrary::DrawDebugArrow(World, Transform.GetLocation(), Transform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldVelocity_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Green, 0.0f, 25.0f);
+			FVector CenterOfMass = BuoyantMesh->GetBodyInstance()->GetCOMPosition();
+			FVector HydrostaticForce = BuoyancyData.SubFrameCircularBuffer[1].CumulativeHydrostaticForces;
+			FVector WaterEntryForce = BuoyancyData.SubFrameCircularBuffer[1].CumulativeWaterEntryForces;
+			FVector PressureDragForce = BuoyancyData.SubFrameCircularBuffer[1].CumulativePressureDragForces;
+			FVector ViscousWaterResistanceForce = BuoyancyData.SubFrameCircularBuffer[1].CumulativeWaterResistanceForce;
+
+			UKismetSystemLibrary::DrawDebugArrow(World, CenterOfMass, CenterOfMass + (HydrostaticForce / ForceLengthScalar), 16.0f, FColor::Blue, 0.0f, 16.0f);
+			UKismetSystemLibrary::DrawDebugArrow(World, WaterEntryForce, CenterOfMass + (WaterEntryForce / ForceLengthScalar), 16.0f, FColor::Red, 0.0f, 16.0f);
+			UKismetSystemLibrary::DrawDebugArrow(World, CenterOfMass, CenterOfMass + (PressureDragForce / ForceLengthScalar), 16.0f, FColor::Orange, 0.0f, 16.0f);
+			UKismetSystemLibrary::DrawDebugArrow(World, CenterOfMass, CenterOfMass + (ViscousWaterResistanceForce / ForceLengthScalar), 16.0f, FLinearColor::Green, 0.0f, 16.0f);
 		}
-	}
-	
-	//UPDATE_TASK: Cleanup and add debug visuals
-	if (bDebugDrawMeshData)
-	{
-		//Intersect the triangles and create the necessary sub-triangles
-		if (BuoyancyData.SubFrameCircularBuffer.IsValidIndex(1))
-		{
-			for (int32 TriIndex = 0; TriIndex < BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles.Num(); TriIndex++)
-			{
-				//Triangle Normal
-				DrawDebugLine(GetWorld(), BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Center, (500.0f *  BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].OutwardNormal) + BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.Triangles[TriIndex].Center, FColor::White, false, -1.0f, 000, 8.0f);
-				//Mesh Tris...
-				//Mesh Verts...
-			}
-		}		
 	}
 }
 

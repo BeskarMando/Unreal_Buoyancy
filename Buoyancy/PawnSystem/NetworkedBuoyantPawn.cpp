@@ -23,6 +23,7 @@
 #include "NetworkedBuoyantPawn.h"
 #include "BuoyantMeshComponent.h"
 #include "NetworkedBuoyantPawnMovementComponent.h"
+#include "PhysicsMovementReplication.h"
 
 //IMPORT_TASK: Change to Engine variants
 //UPDATE_TASK: Provide the ability to override them in the constructor with custom classes 
@@ -40,11 +41,12 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "UnrealNetwork.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "Kismet/KismetMathLibrary.h"
 
 #define PrintWarning(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 10, FColor::Red, Text)
 #define PrintMessage(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 10, FColor::Green, Text)
 #define LogWarning(Text) UE_LOG(LogTemp, Warning, TEXT(Text))
-
 
 FName ANetworkedBuoyantPawn::BuoyantMeshComponentName(TEXT("BuoyantMeshComponent"));
 FName ANetworkedBuoyantPawn::BuoyantMovementComponentName(TEXT("BuoyantMovementComponent"));
@@ -53,39 +55,83 @@ ANetworkedBuoyantPawn::ANetworkedBuoyantPawn(const FObjectInitializer& ObjectIni
 	: Super(ObjectInitializer)
 {
 	BuoyantMeshComponent = CreateDefaultSubobject<UBuoyantMeshComponent>(ANetworkedBuoyantPawn::BuoyantMeshComponentName);
-	BuoyantMeshComponent->bAlwaysCreatePhysicsState = true;
-
-	RootComponent = BuoyantMeshComponent;	
-	BuoyantMovementComponent = CreateDefaultSubobject<UNetworkedBuoyantPawnMovementComponent>(ANetworkedBuoyantPawn::BuoyantMovementComponentName);
-	OnCalculateCustomPhysics.BindUObject(BuoyantMovementComponent, &UNetworkedBuoyantPawnMovementComponent::PhysicsSubstep);
-	BuoyantMovementComponent->UpdatedComponent = BuoyantMeshComponent;
 	BuoyantMeshComponent->SetHiddenInGame(true);
 	BuoyantMeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	RootComponent = BuoyantMeshComponent;
+	BuoyantMeshComponent->BodyInstance.bSimulatePhysics = true;
+	//BuoyantMeshComponent->BodyInstance.SetEnableGravity(false);
+	BuoyantMeshComponent->bAlwaysCreatePhysicsState = true;
+	BuoyantMovementComponent = CreateDefaultSubobject<UNetworkedBuoyantPawnMovementComponent>(ANetworkedBuoyantPawn::BuoyantMovementComponentName);
+	BuoyantMovementComponent->UpdatedComponent = BuoyantMeshComponent;
+	OnCalculateCustomPhysics.BindUObject(BuoyantMovementComponent, &UNetworkedBuoyantPawnMovementComponent::PhysicsSubstep);
+	
 	PrimaryActorTick.bTickEvenWhenPaused = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
-	bReplicateMovement = false; //We use our own custom MovementReplication for Buffer support.
+	bAlwaysRelevant = true;
+	bReplicates = true;
+	bReplicateMovement = false; //We don't utilize the built in movement replication system
+	PhysicsReplicationData.AuthMovementReplication = FPhysicsMovementReplication_ClientAuth();
+	PhysicsReplicationData.ServerMovementReplication = FPhysicsMovementReplication_Server();
+	PhysicsReplicationData.LocalMovementReplication = FPhysicsMovementReplication_Client();
+	PhysicsReplicationData.Settings = FPhysicsReplicationSettings();
 }
 
 void ANetworkedBuoyantPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME_CONDITION(ANetworkedBuoyantPawn, ServerSnapShotBuffer, COND_SkipOwner); 
+	DOREPLIFETIME_CHANGE_CONDITION(ANetworkedBuoyantPawn, ReplicatedMovement, COND_SkipOwner);
 }
 
 void ANetworkedBuoyantPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	/*
+	switch (Role)
+	{
+	case ROLE_Authority:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 1000.0f, 6, FColor::Orange, false);
+		break;
 
-	//Only execute if the pawn is the auth. client - supports listen servers
-	if (Role == ROLE_AutonomousProxy || (Role == ROLE_Authority && IsLocallyControlled()))
+	case ROLE_AutonomousProxy:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 1000.0f, 6, FColor::Yellow, false);
+		break;
+
+	case ROLE_SimulatedProxy:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 1000.0f, 6, FColor::Red, false);
+		break;
+	default:
+		break;
+	}
+	
+	if (IsLocallyControlled())
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 750.0f, 6, FColor::White, false);
+
+	switch (GetRemoteRole())
+	{
+	case ROLE_Authority:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 500.0f, 6, FColor::Blue, false);
+		break;
+
+	case ROLE_AutonomousProxy:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 500.0f, 6, FColor::Green, false);
+		break;
+
+	case ROLE_SimulatedProxy:
+		DrawDebugSphere(GetWorld(), GetActorLocation(), 500.0f, 6, FColor::Purple, false);
+		break;
+	default:
+		break;
+	}
+	*/
+	if (IsLocallyControlled())
 	{
 		GetRootBodyInstance()->AddCustomPhysics(OnCalculateCustomPhysics);
-		ClientPackAndSendSnapshot();
+		ClientUpdateMovement(DeltaTime);
 	}
-	else
-	{
-		PerformBufferSnapshotMovement();
-	}
+	else if(Role == ROLE_Authority)
+		ServerSimulateMovement(DeltaTime);
+	else if (Role == ROLE_SimulatedProxy)
+		SimulateMovement(DeltaTime);
 }
 
 FBodyInstance* ANetworkedBuoyantPawn::GetRootBodyInstance()
@@ -120,73 +166,196 @@ void ANetworkedBuoyantPawn::PostInitializeComponents()
 	}
 }
 
-
 /** Networking **/
-void ANetworkedBuoyantPawn::ClientPackAndSendSnapshot()
+void ANetworkedBuoyantPawn::ClientUpdateMovement(float DeltaTime)
 {
-	if (Role == ROLE_AutonomousProxy || (Role == ROLE_Authority && IsLocallyControlled()))
+	if (IsLocallyControlled())
 	{
-		FBodyInstance* Body = GetRootBodyInstance();
-		if (Body != nullptr)
+		PhysicsReplicationData.AuthMovementReplication.TimeSinceLastPacketSent += DeltaTime;
+		float SendRateFraction = 1.0f / PhysicsReplicationData.Settings.SendRate;
+		if (PhysicsReplicationData.AuthMovementReplication.TimeSinceLastPacketSent >= SendRateFraction)
 		{
-			FVector Loc = Body->GetUnrealWorldTransform_AssumesLocked().GetLocation();
-			FRotator Rot = Body->GetUnrealWorldTransform_AssumesLocked().GetRotation().Rotator();
-			FVector LinVel = Body->GetUnrealWorldVelocity_AssumesLocked();
-			FVector AngVel = FMath::RadiansToDegrees(Body->GetUnrealWorldAngularVelocityInRadians_AssumesLocked());
-			float TimeStamp = GetWorld()->GetGameState<ASOWGameState>()->GetServerWorldTimeSeconds();
-			FMovementSnapshot NewSnapShot = FMovementSnapshot(LinVel, AngVel, Loc, Rot, TimeStamp);
-			ServerReceiveSnapShot(NewSnapShot);
+			PhysicsReplicationData.AuthMovementReplication.TimeSinceLastPacketSent -= SendRateFraction;
+			FBodyInstance* Body = GetRootBodyInstance();
+			if (Body != nullptr)
+			{
+				FVector Loc = Body->GetUnrealWorldTransform_AssumesLocked().GetLocation();
+				FQuat Rot = Body->GetUnrealWorldTransform_AssumesLocked().GetRotation();
+				FVector LinVel = Body->GetUnrealWorldVelocity_AssumesLocked();
+				FVector AngVel = FMath::RadiansToDegrees(Body->GetUnrealWorldAngularVelocityInRadians_AssumesLocked());
+				float TimeStamp = GetWorld()->GetGameState<ASOWGameState>()->GetServerWorldTimeSeconds();
+				FMovementSnapshot NewSnapShot = FMovementSnapshot(LinVel, AngVel, Loc, Rot, TimeStamp);
+				ServerRecieveMovement(NewSnapShot);
+				//Experiment and see if storing a copy of the snapshot for Player collision resolution is needed
+			}
 		}
 	}
 }
 
-void ANetworkedBuoyantPawn::ServerReceiveSnapShot_Implementation(FMovementSnapshot SnapShot)
+void ANetworkedBuoyantPawn::ServerRecieveMovement_Implementation(const FMovementSnapshot& SnapShot)
 {
-	//Verify Snapshot
-	//Update snapshot buffer
-	ServerUpdateSnapshotBuffer(SnapShot);
+	ServerHandleRecievedMovement(SnapShot);
+	MultiCastRecieveMovement(SnapShot);
 }
 
-bool ANetworkedBuoyantPawn::ServerReceiveSnapShot_Validate(FMovementSnapshot SnapShot)
+//UPDATE_TASK: ADDITIONAL_NETWORKING - Implement cheating checks here
+bool ANetworkedBuoyantPawn::ServerRecieveMovement_Validate(const FMovementSnapshot& SnapShot)
 {
 	return true;
 }
 
-void ANetworkedBuoyantPawn::ServerUpdateSnapshotBuffer(FMovementSnapshot SnapShot)
+void ANetworkedBuoyantPawn::ServerHandleRecievedMovement(const FMovementSnapshot& ClientSnapShot)
 {
-	ServerSnapShotBuffer.UpdateSnapShots(SnapShot); //Triggers an OnRep Event
-}
-
-void ANetworkedBuoyantPawn::OnRep_SnapShotReplicatedMovement()
-{
-	LocalSnapShotBuffer = ServerSnapShotBuffer;
-	//Update the local snapshot buffer
-}
-
-void ANetworkedBuoyantPawn::PerformBufferSnapshotMovement()
-{
-	FBodyInstance* RootBodyInstance = GetRootBodyInstance();
-	if (RootBodyInstance)
+	if (!IsLocallyControlled() && Role == ROLE_Authority)
 	{
-		if (Role == ROLE_Authority && !IsLocallyControlled())
+		//UPDATE_TASK: Run anti-cheat and dynamic collision flags here
+		PhysicsReplicationData.ServerMovementReplication.SnapshotBuffer.AddToBuffer(ClientSnapShot);
+		PhysicsReplicationData.ServerMovementReplication.TimeSinceLastPacketRecieved = 0.0f;
+	}
+}
+
+void ANetworkedBuoyantPawn::ServerSimulateMovement(float DeltaTime)
+{
+	if (!IsLocallyControlled() && Role == ROLE_Authority)
+	{
+		PhysicsReplicationData.ServerMovementReplication.TimeSinceLastPacketRecieved += DeltaTime;
+
+		//IMPORT_TASK: Change to AGameState instead
+		//UPDATE_TASK: Correctly update the server time to prevent drift by overriding GetServerWorldTimeSeconds()
+		ASOWGameState* SOWGS = GetWorld()->GetGameState<ASOWGameState>();
+		if (SOWGS)
 		{
-			if (ServerSnapShotBuffer.SnapshotBuffer.IsValidIndex(0))
+			float Time = GetWorld()->GetUnpausedTimeSeconds();
+
+			const FMovementSnapShotBuffer& SnapShotBuffer = PhysicsReplicationData.ServerMovementReplication.SnapshotBuffer;		
+			int32 TargetIndex;
+			int32 CurrentIndex;
+			if (SnapShotBuffer.HasElapsedMinTime(Time))
 			{
-				FTransform NewTransform = FTransform(ServerSnapShotBuffer.SnapshotBuffer[0].Rotation, ServerSnapShotBuffer.SnapshotBuffer[0].Location);
-				RootBodyInstance->SetBodyTransform(NewTransform, ETeleportType::None);
-				RootBodyInstance->SetLinearVelocity(ServerSnapShotBuffer.SnapshotBuffer[0].LinearVelocity, false);
-				RootBodyInstance->SetAngularVelocityInRadians(FMath::DegreesToRadians(ServerSnapShotBuffer.SnapshotBuffer[0].AngularVelocity), false);
+				if (SnapShotBuffer.GetTargetSnapshotIndex(Time, TargetIndex) &&  SnapShotBuffer.GetCurrentSnapshotIndex(Time, CurrentIndex))
+				{
+					FBodyInstance* Body = GetRootBodyInstance();
+					if (Body != nullptr)
+					{
+						const FMovementSnapshot& TargetSnapshot = SnapShotBuffer.Buffer[TargetIndex];
+						const FMovementSnapshot& CurrentSnapshot = SnapShotBuffer.Buffer[CurrentIndex];
+
+						/* TODO: IMPLEMENT SMOOTHING ALGORITHM? */
+						/*
+						Interpolation alpha formula for a buffer containing missing and or continuous snapshots is the following:
+						(SnapshotInterval / (SnapshotB.Time - SnapshotA.Time)) * (CurrentTime - ((BufferSize * SnapshotInterval) + SnapshotA.Time))
+						*/
+
+						const float AT = CurrentSnapshot.TimeStamp;
+						const float BT = TargetSnapshot.TimeStamp;
+						const float CT = Time;
+						const float BI = 1.0f / PhysicsReplicationData.Settings.SendRate;
+						const float BS = PhysicsReplicationData.Settings.BufferSize / 1000.0f;
+						const float BSI = BI * BS;
+						const float IS = BI / (BT - AT);
+						const float A = IS * (CT - (BSI + AT));
+
+						const float Alpha = A;
+						FQuat RotLerp = FQuat::Slerp(Body->GetUnrealWorldTransform_AssumesLocked().GetRotation(), TargetSnapshot.Rotation, Alpha); //FQuat::Identity;
+						FVector LocLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldTransform_AssumesLocked().GetLocation(), TargetSnapshot.Location,Alpha);//FVector::ZeroVector;
+						FVector LinVelLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldVelocity_AssumesLocked(), TargetSnapshot.LinearVelocity, Alpha);//FVector::ZeroVector;
+						FVector AngVelLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldAngularVelocityInRadians_AssumesLocked(), TargetSnapshot.AngularVelocity, Alpha);//FVector::ZeroVector;
+						FTransform NewTransform = FTransform(RotLerp, LocLerp);
+
+						Body->SetBodyTransform(NewTransform, ETeleportType::TeleportPhysics);
+						Body->SetLinearVelocity(LinVelLerp, false);
+						Body->SetAngularVelocityInRadians(AngVelLerp, false);
+					}
+				}
+			}
+			PhysicsReplicationData.ServerMovementReplication.SnapshotBuffer.Update(Time);
+		}	
+	}
+}
+
+void ANetworkedBuoyantPawn::SimulateMovement(float DeltaTime)
+{
+	//PhysicsReplicationData.LocalMovementReplication.TimeSinceLastPacketRecieved += DeltaTime;
+
+	//IMPORT_TASK: Change to AGameState instead
+	//UPDATE_TASK: Correctly update the server time to prevent drift by overriding GetServerWorldTimeSeconds()
+	ASOWGameState* SOWGS = GetWorld()->GetGameState<ASOWGameState>();
+	if (SOWGS)
+	{
+		float Time = SOWGS->GetServerWorldTimeSeconds();
+
+		const FMovementSnapShotBuffer& SnapShotBuffer = PhysicsReplicationData.LocalMovementReplication.SnapshotBuffer;
+		int32 TargetIndex;
+		int32 CurrentIndex;
+		if (SnapShotBuffer.HasElapsedMinTime(Time))
+		{
+			if (SnapShotBuffer.GetTargetSnapshotIndex(Time, TargetIndex) && SnapShotBuffer.GetCurrentSnapshotIndex(Time, CurrentIndex))
+			{
+				FBodyInstance* Body = GetRootBodyInstance();
+				if (Body != nullptr)
+				{
+					const FMovementSnapshot& TargetSnapshot = SnapShotBuffer.Buffer[TargetIndex];
+					const FMovementSnapshot& CurrentSnapshot = SnapShotBuffer.Buffer[CurrentIndex];
+					/* TODO: IMPLEMENT SMOOTHING ALGORITHM? */
+					/*
+					Interpolation alpha formula for a buffer containing missing and or continuous snapshots is the following:
+					(SnapshotInterval / (SnapshotB.Time - SnapshotA.Time)) * (CurrentTime - ((BufferSize * SnapshotInterval) + SnapshotA.Time))
+					*/
+
+					const float AT = CurrentSnapshot.TimeStamp;
+					const float BT = TargetSnapshot.TimeStamp;
+					const float CT = Time;
+					const float BI = 1.0f / PhysicsReplicationData.Settings.SendRate;
+					const float BS = PhysicsReplicationData.Settings.BufferSize / 1000.0f;
+					const float BSI = BI * BS;
+					const float IS = BI / (BT - AT);
+					const float A = IS * (CT - (BSI + AT));
+
+					const float Alpha = A;
+					FQuat RotLerp = FQuat::Slerp(Body->GetUnrealWorldTransform_AssumesLocked().GetRotation(), TargetSnapshot.Rotation, Alpha); //FQuat::Identity;
+					FVector LocLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldTransform_AssumesLocked().GetLocation(), TargetSnapshot.Location, Alpha);//FVector::ZeroVector;
+					FVector LinVelLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldVelocity_AssumesLocked(), TargetSnapshot.LinearVelocity, Alpha);//FVector::ZeroVector;
+					FVector AngVelLerp = UKismetMathLibrary::VLerp(Body->GetUnrealWorldAngularVelocityInRadians_AssumesLocked(), TargetSnapshot.AngularVelocity, Alpha);//FVector::ZeroVector;
+					FTransform NewTransform = FTransform(RotLerp, LocLerp);
+
+					Body->SetBodyTransform(NewTransform, ETeleportType::TeleportPhysics);
+					Body->SetLinearVelocity(LinVelLerp, false);
+					Body->SetAngularVelocityInRadians(AngVelLerp, false);
+				}
 			}
 		}
-		else if(Role == ROLE_SimulatedProxy)
+		PhysicsReplicationData.LocalMovementReplication.SnapshotBuffer.Update(Time);
+	}
+}
+
+void ANetworkedBuoyantPawn::MultiCastRecieveMovement_Implementation(const FMovementSnapshot& SentSnapShot)
+{
+	if (Role == ROLE_SimulatedProxy) //Proxy Client
+	{
+		PhysicsReplicationData.LocalMovementReplication.SnapshotBuffer.AddToBuffer(SentSnapShot);
+	}
+}
+
+//UPDATE_TASK: ADDITIONAL_NETWORKING - Handle Player on Player Collision here
+void ANetworkedBuoyantPawn::OnRep_ReplicatedMovement()
+{
+	Super::OnRep_ReplicatedMovement();
+}
+
+void ANetworkedBuoyantPawn::Restart()
+{
+	Super::Restart();
+	if (GetNetMode() < NM_Client && !IsLocallyControlled())
+	{
+		FBodyInstance* Body = GetRootBodyInstance();
+		if (Body != nullptr)
 		{
-			if (LocalSnapShotBuffer.SnapshotBuffer.IsValidIndex(0))
-			{
-				FTransform NewTransform = FTransform(LocalSnapShotBuffer.SnapshotBuffer[0].Rotation, LocalSnapShotBuffer.SnapshotBuffer[0].Location);
-				RootBodyInstance->SetBodyTransform(NewTransform, ETeleportType::None);
-				RootBodyInstance->SetLinearVelocity(LocalSnapShotBuffer.SnapshotBuffer[0].LinearVelocity, false);
-				RootBodyInstance->SetAngularVelocityInRadians(FMath::DegreesToRadians(LocalSnapShotBuffer.SnapshotBuffer[0].AngularVelocity), false);
-			}
+			Body->SetEnableGravity(false);
 		}
 	}
+}
+
+void ANetworkedBuoyantPawn::BeginPlay()
+{
+	Super::BeginPlay();
 }
