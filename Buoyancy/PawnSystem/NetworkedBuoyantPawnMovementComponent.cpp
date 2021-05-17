@@ -40,9 +40,9 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsMovementReplication.h"
 #include "UnrealNetwork.h"
+#include "../../Utilities/MathematicsLibrary.h"
 
 #define PrintWarning(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 10, FColor::Red, Text)
-//#define PrintMessage(Text) if(GEngine) GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Green, Text)
 #define LogWarning(Text) UE_LOG(LogTemp, Warning, TEXT(Text))
 
 DECLARE_CYCLE_STAT(TEXT("UpdateWaterGrid"), STAT_WaterGrid, STATGROUP_BuoyancyPhysics);
@@ -71,6 +71,7 @@ UNetworkedBuoyantPawnMovementComponent::UNetworkedBuoyantPawnMovementComponent()
 
 void UNetworkedBuoyantPawnMovementComponent::CreateBuoyantData(class UBuoyantMeshComponent* NewBuoyantMesh, FWaterGrid& OutWaterGrid, FBuoyancyData& OutBuoyancyData, FBodyInstance* OutBodyInstance, float CellSize, FVector OwnerLocation)
 {
+	//Get the static mesh rendering data
 	int32 NumLODs = NewBuoyantMesh->GetStaticMesh()->RenderData->LODResources.Num();
 	FStaticMeshLODResources& LODResource = NewBuoyantMesh->GetStaticMesh()->RenderData->LODResources[NumLODs - 1];
 	int numIndices = LODResource.IndexBuffer.IndexBufferRHI->GetSize() / sizeof(uint16);
@@ -127,7 +128,7 @@ void UNetworkedBuoyantPawnMovementComponent::CreateBuoyantData(class UBuoyantMes
 		RawMeshVertices.Add(MVertB);
 		RawMeshVertices.Add(MVertC);
 	}
-
+	//Create our data, and apply our body instance override settings
 	FMeshData MeshData = FMeshData(RawMeshVertices);
 	OutBuoyancyData = FBuoyancyData(16, MeshData);
 	OutWaterGrid = FWaterGrid(CellSize, NewBuoyantMesh->GetStaticMesh()->GetBoundingBox().GetSize(), OwnerLocation);
@@ -166,7 +167,7 @@ void UNetworkedBuoyantPawnMovementComponent::PhysicsSubstep(float DeltaSubstepTi
 	ANetworkedBuoyantPawn* Pawn = Cast<ANetworkedBuoyantPawn>(GetOwner());
 	if (Pawn)
 	{
-		//Only update if the pawn is the auth. client - supports listen servers
+		//Only update if the pawn is the authoritative (autonomous) client - this also supports listen servers
 		if (Pawn->Role == ROLE_AutonomousProxy || (Pawn->Role == ROLE_Authority && Pawn->IsLocallyControlled()))
 		{
 			SCOPE_CYCLE_COUNTER(STAT_Substep);
@@ -499,6 +500,13 @@ void UNetworkedBuoyantPawnMovementComponent::ApplyDampingForcesForTriangle(FBuoy
 	}
 }
 
+//UPDATE_TASK: REYNOLDS_NUMBER_LENGTH - calculate the length here
+//The cheapest way to calculate is to utilize a bounding box - maybe?
+//Try using width initially, currently we utilize hull length.
+//It's substantially easier to calculate the travel/characteristic length as width.
+//To calculate the length we need to derive the perpendicular vector from the velocity
+//otherwise we will have to come up with a formula for finding 
+//which triangles, this would be expensive!
 void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTriangle& Triangle, float SubstepDeltaTime, FBodyInstance* BodyInstance)
 {
 	SCOPE_CYCLE_COUNTER(STAT_CalcForcesPerTri);
@@ -544,7 +552,8 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 			V = Speed
 
 			Reynolds Number (Rn):
-			C (Resistance Coefficient) from the Fluid Dynamics Drag Equation can  be expressed utilizing:
+			C (Resistance Coefficient) from the Fluid Dynamics Drag Equation 
+			can be expressed utilizing:
 			Rn = (VL)/v
 			V = Speed of the body
 			L = Length of the fluid across the body
@@ -552,16 +561,18 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 			The Resistance coefficient is calculated as Cf(Rn) = 0.075/(log10Rn-2)^2
 			*/
 
-			//UPDATE_TASK: REYNOLDS_NUMBER_LENGTH - calculate the length here
-			const float Length = BuoyancyInformation.HullLength;
-			const float ReynoldsNumber = (Triangle.Velocity.Size() * Length) / BuoyancyInformation.FluidViscosity;		
-			const float ResistanceCoefficient = 0.075f / FMath::Pow(FMath::LogX(10, ReynoldsNumber) - 2.0f, 2.0f); 	//UPDATE_TASK: OPTIMIZATION_UPDATE - Check cost of Log10
+			//EXPERIMENTAL: 
+			const float RIGHT_ANGLE = 90.0f;
+			const float AngleTheta = UMathematicsLibrary::GetAngleBetweenTwoVectors(Triangle.OutwardNormal, Triangle.Velocity.GetSafeNormal());
+			const float Length = (FMath::Sin(AngleTheta) * Triangle.Area) / RIGHT_ANGLE;
+			//const float Length = BuoyancyInformation.HullLength;
+			const float ReynoldsNumber = (Triangle.Velocity.Size() * Length) / BuoyancyInformation.FluidViscosity;	
+			//UPDATE_TASK: OPTIMIZATION_UPDATE - Check cost of Log10
+			const float ResistanceCoefficient = 0.075f / FMath::Pow(FMath::LogX(10, ReynoldsNumber) - 2.0f, 2.0f); 
 			const FVector TangentialVelocity = FVector::CrossProduct(Triangle.OutwardNormal, FVector::CrossProduct(Triangle.OutwardNormal, Triangle.Velocity) / Triangle.Velocity.Size()) / Triangle.Velocity.Size();
-
 			const FVector TangentialDirection = TangentialVelocity.GetSafeNormal(); 
 			const FVector UnIntegratedTangentialFlow = Triangle.Velocity.Size() * TangentialDirection;
-			Triangle.WaterResistanceForce = 0.5f * (BuoyancyInformation.FluidDensity) *  ResistanceCoefficient * Triangle.Area * UnIntegratedTangentialFlow * UnIntegratedTangentialFlow.Size() * BuoyancyInformation.DampingForces.VWRFScalar;
-			
+			Triangle.WaterResistanceForce = 0.5f * BuoyancyInformation.FluidDensity *  ResistanceCoefficient * Triangle.Area * UnIntegratedTangentialFlow * UnIntegratedTangentialFlow.Size() * BuoyancyInformation.DampingForces.VWRFScalar;
 			BuoyancyData.SubFrameCircularBuffer[1].CumulativeWaterResistanceForce += Triangle.WaterResistanceForce;
 			
 			if(bDebugDrawViscousWaterResistanceForce)
@@ -573,7 +584,7 @@ void UNetworkedBuoyantPawnMovementComponent::CalculateTrianglesForces(FBuoyantTr
 void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 {
 	UWorld* World = GetWorld();
-
+	//Draw the white debug grid (height map)
 	if (bDebugDrawGrid)
 	{
 		for (int CRow = 0; CRow < WaterGrid.Cells.Num(); CRow++)
@@ -589,15 +600,16 @@ void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 			}
 		}
 	}
-	
+	//Draw the grid's extent and the target bounds
 	if (bDebugDrawGridTargetBounds)
 	{
 		DrawDebugBox(World, BodyInstanceTransform.GetLocation(), WaterGrid.TargetBounds.GetExtent(), FColor::Yellow, false);
-		DrawDebugBox(World, WaterGrid.GetCenter(), WaterGrid.GridBounds.GetCenter(), FColor::Red, false);
+		DrawDebugBox(World, WaterGrid.GetCenter(), WaterGrid.GridBounds.GetExtent(), FColor::Red, false); //There's an issue here.
 	}
-
+	//Draw the current frame's data 
 	if (BuoyancyData.SubFrameCircularBuffer.IsValidIndex(1))
 	{
+		//draw the submerged triangles - the triangles where force is applied to and calculated from.
 		if (bDebugDrawForceTriangles)
 		{
 			for (FBuoyantTriangle& Triangle : BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.SubmergedTriangles)
@@ -615,12 +627,14 @@ void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 			DrawDebugSphere(World, BuoyantMesh->BodyInstance.GetCOMPosition(), 64.0f, 8, FColor::Yellow, false);
 		}
 
+		//draw the difference in velocity direction and heading (orientation)
 		if (bDebugDrawHeading)
 		{
 			UKismetSystemLibrary::DrawDebugArrow(World, BodyInstanceTransform.GetLocation(), BodyInstanceTransform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldAngularVelocityInRadians_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Blue, 0.0f, 25.0f);
 			UKismetSystemLibrary::DrawDebugArrow(World, BodyInstanceTransform.GetLocation(), BodyInstanceTransform.GetLocation() + (1000.0f * BuoyantMesh->GetBodyInstance()->GetUnrealWorldVelocity_AssumesLocked().GetSafeNormal()), 100.0f, FColor::Green, 0.0f, 25.0f);
 		}
 		
+		//Draw the information about the static mesh's data
 		if (bDebugDrawMeshData)
 		{
 			//Triangles
@@ -644,7 +658,7 @@ void UNetworkedBuoyantPawnMovementComponent::DrawBuoyantDebug()
 				DrawDebugSphere(World, BuoyancyData.SubFrameCircularBuffer[1].BuoyantData.UniqueVertices[VertIndex].Vertex, 8.0f, 4, FColor::White, false);
 			}
 		}
-		
+		//draw comparative visuals of the various forces
 		if (bDebugDrawCompareForces)
 		{
 			FVector CenterOfMass = BuoyantMesh->GetBodyInstance()->GetCOMPosition();
