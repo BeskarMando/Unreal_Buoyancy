@@ -158,7 +158,7 @@ public:
 /** Buoyancy **/
 public: 
 	/**
-	*	See if the mass is overriden in the override settings
+	*	See if the mass is overridden in the override settings
 	*	@return	bool - returns the value of bOverrideMassin the physics override settings
 	*/
 	bool ShouldOverrideMass() { return BuoyancyInformation.PhysicsOverrides.bOverrideMass; }
@@ -252,13 +252,16 @@ protected:
 protected:
 	UPROPERTY()
 		class UBuoyantMeshComponent* BuoyantMesh = nullptr; //Reference to the root component used for our physics simulation
-	//IMPORT_TASK: Set this to your ocean actor - to do create height request function inside the movement class
+	//IMPORT_TASK: Set this to your ocean actor - TODO: create height request function inside the movement class
 	UPROPERTY()
 		class ASOWOceanActor* OceanActor = nullptr; // Reference to ocean actor for height queries
 
 /** Movement **/
 public:
-	virtual void PhysicsSubstep(float DeltaTime, FBodyInstance* BodyInstance);
+	/*
+	*	SubStep the physics simulation 
+	*/
+	virtual void PhysicsSubstep(float DeltaTime, FBodyInstance* BodyInstance); 
 
 protected:
 	/**
