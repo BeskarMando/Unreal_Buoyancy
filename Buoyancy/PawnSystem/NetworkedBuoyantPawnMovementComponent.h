@@ -2,11 +2,11 @@
 * FileName: NetworkedBuoyantPawnMovementComponent.h
 *
 * Created by: Tobias Moos
-* Project name: Sails of War / OceanProject
+* Project name: Sails of War
 * Unreal Engine version: 4.19
 * Created on: 2020/01/08
 *
-* Last Edited on: 2020/7/24
+* Last Edited on: 2021/01/07
 * Last Edited by: Tobias Moos
 *
 * -------------------------------------------------
@@ -25,7 +25,6 @@
 *
 * Feel free to use this software in any commercial/free game.
 * Selling this as a plugin/item, in whole or part, is not allowed.
-* See "OceanProject\License.md" for full licensing details.
 * =================================================*/
 #pragma once
 
@@ -38,6 +37,7 @@ struct FBodyInstance;
 DECLARE_STATS_GROUP(TEXT("NetworkedBuoyantPawnMovementComponent - Buoyancy Physics"), STATGROUP_BuoyancyPhysics, STATCAT_Advanced);
 DECLARE_STATS_GROUP(TEXT("NetworkedBuoyantPawnMovementComponent - Movement Physics"), STATGROUP_PhysicsMovement, STATCAT_Advanced);
 
+//Container storing the values about the hydrodynamic forces and their damping values.
 USTRUCT()
 struct FBuoyancyInformationDampingForces
 {
@@ -79,10 +79,14 @@ struct FBuoyancyInformationDampingForces
 	UPROPERTY(EditAnywhere, Category = "Buoyancy|Forces|Scalars")
 		FVector VWRFScalar = FVector(1.f); //Scalar used to scale the Viscous Water Resistance forces being applied
 
+	UPROPERTY(EditAnywhere, Category = "Buoyancy|Forces|Scalars")
+		FVector HullScalar = FVector(1.f);
+
 	FBuoyancyInformationDampingForces() {};
 
 };
 
+//Overrides for the physics settings used by the BuoyantMeshComponent's Root Rigid Body - see CreateBuoyantData()
 USTRUCT()
 struct FPhysicsOverrides
 {
@@ -109,6 +113,7 @@ struct FPhysicsOverrides
 	FPhysicsOverrides() {};
 };
 
+//Main container for the buoyancy values and physics used in the simulation
 USTRUCT()
 struct FBuoyancyInformation
 {
@@ -153,13 +158,13 @@ public:
 /** Buoyancy **/
 public: 
 	/**
-	*	
-	*	@return	bool -
+	*	See if the mass is overriden in the override settings
+	*	@return	bool - returns the value of bOverrideMassin the physics override settings
 	*/
 	bool ShouldOverrideMass() { return BuoyancyInformation.PhysicsOverrides.bOverrideMass; }
 	/**
-	*	
-	*	@return	float -
+	*	Get the Overridden Mass
+	*	@return	float - return the mass override (Kg)
 	*/
 	float GetMassOverride() { return BuoyancyInformation.PhysicsOverrides.MassOverride; }
 
@@ -175,6 +180,7 @@ public:
 	void CreateBuoyantData(class UBuoyantMeshComponent* NewBuoyantMesh, FWaterGrid& OutWaterGrid, FBuoyancyData& OutBuoyancyData, FBodyInstance* BodyInstance, float CellSize, FVector OwnerLocation);
 
 	/**
+	*	Set the current BuoyantMeshComponent to a new BuoyantMeshComponent
 	*	@param	NewBuoyantMesh - The new buoyant mesh component to use for buoyancy
 	*/
 	void SetBuoyantMesh(class UBuoyantMeshComponent* NewBuoyantMesh);
@@ -338,5 +344,5 @@ private:
 
 /*UMovementComponent Overrides*/
 public:
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override; //Overriden to draw debug information every frame
+	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override; //Overridden to draw debug information every frame
 };
