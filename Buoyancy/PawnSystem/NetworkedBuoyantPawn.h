@@ -2,11 +2,11 @@
 * FileName: NetworkedBuoyantPawn.h
 *
 * Created by: Tobias Moos
-* Project name: Sails of War / OceanProject
+* Project name: Sails of War
 * Unreal Engine version: 4.19
 * Created on: 2020/01/08
 *
-* Last Edited on: 2020/03/6
+* Last Edited on: 2021/02/03
 * Last Edited by: Tobias Moos
 * -------------------------------------------------
 * Useful Resources on Networking Physics Movement:
@@ -21,7 +21,6 @@
 *
 * Feel free to use this software in any commercial/free game.
 * Selling this as a plugin/item, in whole or part, is not allowed.
-* See "OceanProject\License.md" for full licensing details.
 * =================================================*/
 #pragma once
 
@@ -56,24 +55,24 @@ public:
 	ANetworkedBuoyantPawn(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 	
 	/**
-	*	
-	*	@return UNetworkedBuoyantPawnMovementComponent* -
+	*	Get the BuoyantMovementComponent
+	*	@return UNetworkedBuoyantPawnMovementComponent* -  returns a const version  of the BuoyantMovementComponent
 	*/
 	class UNetworkedBuoyantPawnMovementComponent* GetBuoyantMovementComponent() const { return BuoyantMovementComponent; }
 
 	/**
-	*	
-	*	@return UBuoyantMeshComponent* -
+	*	Get the BuoyantMeshComponent
+	*	@return UBuoyantMeshComponent* - returns a const version of the BuoyantMeshComponent
 	*/
 	class UBuoyantMeshComponent* GetBuoyantMeshComponent() const { return BuoyantMeshComponent; }
 
-	/**  */
+	/** The name of the buoyant movement component for the constructor */
 	static FName BuoyantMovementComponentName;
 
-	/**  */
+	/** The name of the buoyant mesh for the constructor */
 	static FName BuoyantMeshComponentName;
 
-private:
+protected:
 	UPROPERTY(EditDefaultsOnly)
 		class UNetworkedBuoyantPawnMovementComponent* BuoyantMovementComponent; //Movement Component to handle buoyancy
 	
@@ -90,43 +89,39 @@ public:
 
 	FCalculateCustomPhysics OnCalculateCustomPhysics; //Binds the pawn tick to our sub-steps in the MovementComponent
 
-public:
-	void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
-	virtual void Tick(float DeltaTime) override;
-	virtual UPawnMovementComponent* GetMovementComponent() const override;
-	virtual void PostInitializeComponents() override; //Overridden to set our required tick order & trigger the buoyant mesh setup
-
-
 /** Networking **/
 protected:
 	/**
-	*	Attempt to send an RPC update to the server if the interval between updates has passed.
-	*	@param	DeltaTime - 
+	*	Attempt to send an RPC update to the server if the interval value between updates has passed.
+	*	@param	DeltaTime -  fractional time used to scale values by.
 	*/
 	virtual void ClientUpdateMovement(float DeltaTime);
 
+	//TODO: This should be marked to be done after simulation of the movement for this frame!
 	/**
-	*
-	*	@param	SnapShot -
+	*	Update the buffer on the server and multi-cast this snapshot to the clients.
+	*	@param	SnapShot - the movement snapshot received from the autonomous client
 	*/
 	UFUNCTION(Server, Unreliable, WithValidation)
 	virtual void ServerRecieveMovement(const FMovementSnapshot& SnapShot);
 
 	/**
-	*	
-	*	@param	SnapShot - 
+	*	Handle the recieved snapshot from the client by adding it to the buffer
+	*	@param	SnapShot - The movement snapshot received from the autonomous client 
 	*/
 	virtual void ServerHandleRecievedMovement(const FMovementSnapshot& SnapShot);
 
 	/**
-	*	
-	*	@param	DeltaTime - 
+	*	Simulate the movement on the server 
+	*	and update the server buffer after completion
+	*	@param	DeltaTime - fractional time used to scale values by. 
 	*/
 	virtual void ServerSimulateMovement(float DeltaTime);
 
 	/**
-	*	
-	*	@param	DeltaTime - 
+	*	Simulate the movement locally used for non-autonomous clients 
+	*	and update the local buffer after completion
+	*	@param	DeltaTime - fractional time used to scale values by.
 	*/
 	virtual void SimulateMovement(float DeltaTime);
 
@@ -137,19 +132,35 @@ protected:
 	UFUNCTION(NetMulticast, Unreliable)
 	virtual void MultiCastRecieveMovement(const FMovementSnapshot& SentSnapShot);
 	
-	UPROPERTY()
+	UPROPERTY(EditDefaultsOnly)
 		FPhysicsMovementReplication PhysicsReplicationData; //Physics Movement Replication Information and Data. Not replicated, but manually updated.
 
-	
-
+	//TODO: IMPLEMENT for further Debugging
+	UFUNCTION(BlueprintCallable)
+		void GetLocalSimulationMovementData(FPhysicsMovementReplication_Client& OutLocalData) {};
+	UFUNCTION(BlueprintCallable)
+		void GetServerSimulationMovementData(FPhysicsMovementReplication_Server& OutServerData) {};
+	UFUNCTION(BlueprintCallable)
+		void GetSnapshotBufferTargetIndex(float InTime, int32& OutTarget) {};
+	UFUNCTION(BlueprintCallable)
+		void GetSnapshotBufferCurrentIndex(float InTime, int32& OutTarget) {};
+	UFUNCTION(BlueprintCallable)
+		void GetSnapshotBufferTarget(FMovementSnapShotBuffer InBuffer, FMovementSnapshot& OutTargetSnapshot) {};
+	UFUNCTION(BlueprintCallable)
+		void GetSnapshotBufferCurrent(FMovementSnapShotBuffer InBuffer, FMovementSnapshot& OutCurrentSnapshot) {};
+	UFUNCTION(BlueprintCallable)
+		void GetMovedToSnapshot(FMovementSnapShotBuffer InBuffer, float InTime, FMovementSnapshot& OutSnapShot, float& OutAlpha) {};
+	UFUNCTION(BlueprintImplementableEvent)
+		void BPDrawDebug(float DeltaTime);
 
 /*APawn Overrides*/
 public:
-	virtual void Restart() override;	//Overridden to allow us to disable gravity calculations on the server for client pawns
+	virtual void Restart() override; //Overridden to allow us to disable gravity calculations on the server for client pawns
+	void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override; //Overridden to change the ReplicatedMovement Rep_Condition
+	virtual void Tick(float DeltaTime) override; //Overridden to allow us to update our custom movement
+	virtual UPawnMovementComponent* GetMovementComponent() const override;
+	virtual void PostInitializeComponents() override; //Overridden to set our required tick order & trigger the buoyant mesh setup
 protected:
-	virtual void BeginPlay() override;	//...
 	UFUNCTION()
-	virtual void OnRep_ReplicatedMovement() override;	//...
-
-
+	virtual void OnRep_ReplicatedMovement() override; //Overriden for collision resolution - STILL TODO.
 };
