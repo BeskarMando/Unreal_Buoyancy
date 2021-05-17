@@ -2,7 +2,7 @@
 * FileName: BuoyantMeshComponent.h
 *
 * Created by: Tobias Moos
-* Project name: Sails of War / OceanProject
+* Project name: Sails of War
 * Unreal Engine version: 4.19
 * Created on: 2020/01/08
 *
@@ -17,7 +17,6 @@
 *
 * Feel free to use this software in any commercial/free game.
 * Selling this as a plugin/item, in whole or part, is not allowed.
-* See "OceanProject\License.md" for full licensing details.
 * =================================================*/
 #pragma once
 
