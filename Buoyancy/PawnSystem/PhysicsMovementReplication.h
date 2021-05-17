@@ -3,11 +3,11 @@
 * FileName: NetworkedBuoyantPawn.h
 *
 * Created by: Tobias Moos
-* Project name: Sails of War / OceanProject
+* Project name: Sails of War
 * Unreal Engine version: 4.19
 * Created on: 2020/01/08
 *
-* Last Edited on: 2020/07/24
+* Last Edited on: 2020/12/11
 * Last Edited by: Tobias Moos
 *
 * -------------------------------------------------
@@ -18,7 +18,6 @@
 *
 * Feel free to use this software in any commercial/free game.
 * Selling this as a plugin/item, in whole or part, is not allowed.
-* See "OceanProject\License.md" for full licensing details.
 * =================================================*/
 #pragma once
 
@@ -37,7 +36,8 @@ enum EEventFlag
 	EF_Correction,
 };
 
-USTRUCT()
+//Container containing the settings for replicating this actor
+USTRUCT(BlueprintType)
 struct FPhysicsReplicationSettings
 {
 	GENERATED_BODY()
@@ -50,25 +50,27 @@ struct FPhysicsReplicationSettings
 
 		FPhysicsReplicationSettings() {};
 };
+
 //TODO: COMPRESS USING QUANTIZED VECTORS
-USTRUCT()
+//A single snapshot consisting of velocities, position, orientation, a timestamp and an event flag.
+USTRUCT(BlueprintType)
 struct FMovementSnapshot
 {
 	GENERATED_BODY()
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		FVector LinearVelocity;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		FVector AngularVelocity;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		FVector Location;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		FQuat Rotation;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		float TimeStamp = 0.0f;
 
 	UPROPERTY()
@@ -77,31 +79,33 @@ struct FMovementSnapshot
 	FMovementSnapshot() {};
 	FMovementSnapshot(FVector LinVel, FVector AngVel, FVector Loc, FQuat Rot, float Time) :
 		LinearVelocity(LinVel), AngularVelocity(AngularVelocity), Location(Loc), Rotation(Rot), TimeStamp(Time) {}
+
+	//bool operator <(const FMovementSnapshot& Other) const
+	//{
+		//return TimeStamp < Other.Timestamp;
+	//}
 };
 
-USTRUCT()
+//A buffer containing a series of snapshots of an actor. This is used to interpolate movement, position, rotation and velocity between buffer indexes.
+USTRUCT(BlueprintType)
 struct FMovementSnapShotBuffer
 {
 	GENERATED_BODY()
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		TArray<FMovementSnapshot> Buffer;
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		float BufferDelay = 500.0f; //Delay in milliseconds 
 
-	UPROPERTY()
-		float BufferInterval = 50.0f;
-
+	UPROPERTY(EditDefaultsOnly)
+		float BufferInterval = 50.0f; //The interval between snapshots in milliseconds 
 
 	FMovementSnapShotBuffer() {};
 
-	
-
 	//TODO: CLEANUP
 	void Update(float Time)
-	{
-		
+	{	
 		const float BufferedTime = GetBufferedTime(Time);
 		const float Min = FMath::RoundToZero(BufferedTime / GetBufferInterval()) * GetBufferInterval(); //Always keep the previous timestamp!
 
@@ -117,10 +121,9 @@ struct FMovementSnapShotBuffer
 			NewBuffer.Add(Buffer[IndicesToKeep[i]]);
 		}
 
-		Buffer = NewBuffer;
-		
-		Buffer.Sort(TimeStampPredicate);
-		
+		Buffer = NewBuffer;		
+		Buffer.Sort(TimeStampPredicate);	
+		//Buffer.Sort();
 	}
 	
 	void AddToBuffer(const FMovementSnapshot& SnapShot)
@@ -148,8 +151,6 @@ struct FMovementSnapShotBuffer
 					return true;
 				}
 			}
-
-			return false;
 		}
 
 		return false;
@@ -169,8 +170,6 @@ struct FMovementSnapShotBuffer
 					return true;
 				}
 			}
-
-			return false;
 		}
 
 		return false;
@@ -179,14 +178,11 @@ struct FMovementSnapShotBuffer
 	float GetBufferedTime(float Time) const { return Time - (BufferDelay / 1000.0f); } 
 	float GetBufferInterval() const { return BufferInterval / 1000.0f; }
 	float HasElapsedMinTime(float Time) const { return GetBufferedTime(Time) >= 0.0f; }
-
+	
 	inline static bool TimeStampPredicate(const FMovementSnapshot& A, const FMovementSnapshot& B)
 	{
 		return (A.TimeStamp < B.TimeStamp);
 	}
-	
-
-	
 /*
 * Current Body Info -
 * Previous Snapshot - 
@@ -194,7 +190,8 @@ struct FMovementSnapShotBuffer
 */
 };
 
-USTRUCT()
+//Local Authoritative data buffer for a pawn
+USTRUCT(BlueprintType)
 struct  FPhysicsMovementReplication_ClientAuth
 {
 	GENERATED_BODY()
@@ -209,7 +206,9 @@ struct  FPhysicsMovementReplication_ClientAuth
 
 };
 
-USTRUCT()
+//TODO: Factor in TimeOffset
+//Local Non-Authoritative data buffer for a pawn
+USTRUCT(BlueprintType)
 struct FPhysicsMovementReplication_Client
 {
 	GENERATED_BODY()
@@ -223,7 +222,8 @@ struct FPhysicsMovementReplication_Client
 	FPhysicsMovementReplication_Client() {};
 };
 
-USTRUCT()
+//Server data buffer for a pawn
+USTRUCT(BlueprintType)
 struct FPhysicsMovementReplication_Server
 {
 	GENERATED_BODY()
@@ -237,7 +237,8 @@ struct FPhysicsMovementReplication_Server
 	FPhysicsMovementReplication_Server() {};
 };
 
-USTRUCT()
+//Container for the entirety of the buffer for replication.
+USTRUCT(BlueprintType)
 struct FPhysicsMovementReplication
 {
 	GENERATED_BODY()
@@ -245,14 +246,14 @@ struct FPhysicsMovementReplication
 	UPROPERTY(EditAnywhere)
 		FPhysicsReplicationSettings Settings;
 
-	UPROPERTY()
-		FPhysicsMovementReplication_Client LocalMovementReplication; //The local snapshot buffer for Simulated Proxies
+	UPROPERTY(BlueprintReadOnly)
+		FPhysicsMovementReplication_Client LocalMovementReplication; //The local snapshot buffer for Simulated (Non-Authoritative) clients
 
-	UPROPERTY()
+	UPROPERTY(BlueprintReadOnly)
 		FPhysicsMovementReplication_Server ServerMovementReplication; //The server's snapshot buffer used for collision resolution and keeping track of the snapshots
 
-	UPROPERTY()
-		FPhysicsMovementReplication_ClientAuth AuthMovementReplication;
+	UPROPERTY(BlueprintReadOnly)
+		FPhysicsMovementReplication_ClientAuth AuthMovementReplication; //The local snapshot buffer for the Autonomous (Authoritative) client, this will be used in the future for server call-backs for player on player collision resolution.
 
 	FPhysicsMovementReplication() {};
 };
